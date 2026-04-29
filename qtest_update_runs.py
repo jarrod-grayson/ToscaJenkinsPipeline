@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Update qTest Test Run custom fields for every run nested under a Test Cycle.
+"""Update qTest Test Run custom fields for every run nested under a linked Test Cycle.
 
-Used by the Jenkins pipeline after a Tosca TestEvent has run and Tosca's
-native qTest integration has synced results into the matching Test Cycle.
+Used by the Jenkins pipeline before a Tosca TestEvent has run and Tosca's
+native qTest integration has synced the TestEvent into the matching qTest Test Cycle.
 """
 
 import argparse
