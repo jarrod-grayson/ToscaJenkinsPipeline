@@ -28,6 +28,42 @@ def parse_field(arg: str) -> dict[str, Any]:
     return {"field_id": int(field_id), "field_value": value}
 
 
+def pick_auth_header(
+    session: requests.Session, base: str, project_id: int, raw_token: str
+) -> str:
+    """Probe GET /projects/{pid} with each plausible Authorization format
+    and return the first one that returns 2xx. qTest tokens come in two
+    common shapes: a raw value used as `Authorization: <token>`, and a
+    bearer-style value used as `Authorization: Bearer <token>`. If the
+    user pasted the token with a 'Bearer '/'bearer ' prefix already,
+    use it verbatim.
+    """
+    token = raw_token.strip()
+    if token.lower().startswith("bearer "):
+        candidates = [token]
+    else:
+        candidates = [f"Bearer {token}", token]
+    probe_url = f"{base}/api/v3/projects/{project_id}"
+    last_status = None
+    last_body = ""
+    for value in candidates:
+        r = session.get(probe_url, headers={"Authorization": value}, timeout=30)
+        if r.ok:
+            print(
+                f"qTest auth OK using header style: "
+                f"{'Bearer <token>' if value.lower().startswith('bearer ') else '<token> (raw)'}"
+            )
+            return value
+        last_status = r.status_code
+        last_body = r.text[:300]
+    raise SystemExit(
+        f"qTest auth probe failed: HTTP {last_status} body={last_body}. "
+        "Verify the qtest-pat Jenkins credential holds a valid Personal "
+        "Access Token for sademo.qtestnet.com with access to project "
+        f"{project_id}."
+    )
+
+
 def find_cycle_id(
     session: requests.Session, base: str, project_id: int, name: str
 ) -> int:
@@ -153,11 +189,12 @@ def main() -> int:
     session = requests.Session()
     session.headers.update(
         {
-            "Authorization": f"Bearer {args.token}",
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
     )
+    auth_value = pick_auth_header(session, base, args.project_id, args.token)
+    session.headers["Authorization"] = auth_value
 
     cycle_id = find_cycle_id(session, base, args.project_id, args.cycle_name)
     print(f"Found Test Cycle '{args.cycle_name}' id={cycle_id}")
