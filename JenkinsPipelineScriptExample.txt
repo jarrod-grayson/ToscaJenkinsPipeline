@@ -1,0 +1,142 @@
+pipeline {
+  agent any
+
+  environment {
+    GIT_REPO_URL = 'https://github.com/jarrod-grayson/ToscaJenkinsPipeline'
+    GIT_BRANCH   = 'main'
+
+    QTEST_BASE_URL           = 'https://demo.qtestnet.com'
+    QTEST_PROJECT_ID         = '87143'
+    QTEST_FIELD_ID_BUILD_URL = '15377741'
+    QTEST_FIELD_ID_GIT       = '15377742'
+
+    TOSCA_SERVER_URL = 'https://toscaserverurl.com'
+    TOSCA_PROJECT    = 'common_repository'
+    // TestEvent identity lives in events.json — single source of truth.
+
+    TEC_RESULTS_DIR  = "${WORKSPACE}\\tosca-results"
+    TEC_RESULTS_FILE = 'tosca-results.xml'
+  }
+
+  options {
+    timestamps()
+    buildDiscarder(logRotator(numToKeepStr: '20'))
+    timeout(time: 2, unit: 'HOURS')
+  }
+
+  stages {
+
+    stage('Checkout') {
+      steps {
+        git branch: env.GIT_BRANCH, url: env.GIT_REPO_URL
+      }
+    }
+
+    stage('Compile / Build') {
+      steps { echo 'FAKE STAGE: compile/build OK' }
+    }
+
+    stage('Static Code Analysis') {
+      steps { echo 'FAKE STAGE: static code analysis OK' }
+    }
+
+    stage('Unit Tests') {
+      steps { echo 'FAKE STAGE: unit tests OK' }
+    }
+
+    stage('Update qTest Test Run Custom Fields') {
+      steps {
+        withCredentials([string(credentialsId: 'qtest-pat',
+                                variable: 'QTEST_TOKEN')]) {
+          powershell '''
+            $ErrorActionPreference = "Stop"
+            python -m pip install --quiet --disable-pip-version-check -r requirements.txt
+            $eventsPath = Join-Path $env:WORKSPACE "events.json"
+            $cycleName = (Get-Content $eventsPath -Raw | ConvertFrom-Json)[0]
+            $gitField = "{0} @ {1}" -f $env:GIT_REPO_URL, $env:GIT_BRANCH
+            python qtest_update_runs.py `
+              --base-url    $env:QTEST_BASE_URL `
+              --project-id  $env:QTEST_PROJECT_ID `
+              --token       $env:QTEST_TOKEN `
+              --cycle-name  $cycleName `
+              --field       ("{0}={1}" -f $env:QTEST_FIELD_ID_BUILD_URL, $env:BUILD_URL) `
+              --field       ("{0}={1}" -f $env:QTEST_FIELD_ID_GIT, $gitField)
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          '''
+        }
+      }
+    }
+
+    stage('Tosca Automation') {
+      steps {
+        catchError(buildResult: 'FAILURE', stageResult: 'FAILURE',
+                   message: 'Tosca Execution Client reported failure') {
+          withCredentials([usernamePassword(credentialsId: 'tosca-dex',
+                                            usernameVariable: 'TOSCA_CLIENT_ID',
+                                            passwordVariable: 'TOSCA_CLIENT_SECRET')]) {
+            powershell '''
+              $ErrorActionPreference = "Stop"
+              if (-not (Test-Path $env:TEC_RESULTS_DIR)) {
+                New-Item -ItemType Directory -Path $env:TEC_RESULTS_DIR | Out-Null
+              }
+              & ".\\tosca_execution_client.ps1" `
+                -toscaServerUrl       $env:TOSCA_SERVER_URL `
+                -projectName          $env:TOSCA_PROJECT `
+                -eventsConfigFilePath "$env:WORKSPACE\\events.json" `
+                -clientId             $env:TOSCA_CLIENT_ID `
+                -clientSecret         $env:TOSCA_CLIENT_SECRET `
+                -resultsFolderPath    $env:TEC_RESULTS_DIR `
+                -resultsFileName      $env:TEC_RESULTS_FILE
+              if ($LASTEXITCODE -ne 0) {
+                Write-Output "Tosca Execution Client exit code: $LASTEXITCODE"
+                exit $LASTEXITCODE
+              }
+
+              # Gate: TEC exits 0 even when test cases fail, so inspect the JUnit XML directly.
+              $junitPath = Join-Path $env:TEC_RESULTS_DIR $env:TEC_RESULTS_FILE
+              if (Test-Path $junitPath) {
+                [xml]$results = Get-Content $junitPath
+                $failed = ($results.SelectNodes("//testcase[failure or error]")).Count
+                if ($failed -gt 0) {
+                  Write-Output "Tosca: $failed test case(s) failed - failing the Tosca Automation stage."
+                  exit 1
+                }
+              } else {
+                Write-Output "WARN: JUnit results not found at $junitPath; cannot gate on test pass/fail."
+              }
+            '''
+          }
+        }
+      }
+    }
+
+    stage('Publish Tosca Results') {
+      steps {
+        junit allowEmptyResults: true,
+              testResults: "tosca-results\\${env.TEC_RESULTS_FILE}"
+      }
+    }
+
+    stage('Package / Artifact Creation') {
+      when { expression { currentBuild.currentResult == 'SUCCESS' } }
+      steps { echo 'FAKE STAGE: package / artifact creation OK' }
+    }
+
+    stage('Deployment') {
+      when { expression { currentBuild.currentResult == 'SUCCESS' } }
+      steps { echo 'FAKE STAGE: deployment OK' }
+    }
+
+    stage('Post-Deploy Verification') {
+      when { expression { currentBuild.currentResult == 'SUCCESS' } }
+      steps { echo 'FAKE STAGE: post-deploy verification OK' }
+    }
+  }
+
+  post {
+    always {
+      archiveArtifacts artifacts: 'tosca-results/**',
+                       allowEmptyArchive: true
+    }
+  }
+}
